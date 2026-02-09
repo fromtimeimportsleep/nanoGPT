@@ -424,13 +424,33 @@ class RadixNode:
         self.children = {}    # Dict mapping first token of child to RadixNode
         self.kv_cache = None  # List of (k, v) tuples for this specific segment
 
+class RadixNode:
+    def __init__(self, tokens):
+        self.tokens = tokens  # List of token IDs
+        self.children = {}    # Maps first token of child segment to RadixNode
+        self.kv_cache = None  # List of (k, v) tuples for this specific segment
+
 class RadixTree:
     def __init__(self):
         self.root = RadixNode([])
 
+    def insert(self, parent_node, tokens, kv_cache):
+        """
+        Creates a new node for a unique suffix and links it to the parent.
+        """
+        if not tokens:
+            return parent_node
+        
+        new_node = RadixNode(tokens)
+        new_node.kv_cache = kv_cache
+        # Use the first token of the new segment as the key in the children dict
+        parent_node.children[tokens[0]] = new_node
+        return new_node
+
     def search_and_split(self, tokens):
         """
-        Finds the longest prefix, splitting nodes if a partial match occurs.
+        Finds the longest prefix in the tree. 
+        If a partial match is found within a node, it splits that node.
         """
         current = self.root
         path = []
@@ -442,9 +462,8 @@ class RadixTree:
                 break
                 
             child = current.children[first_token]
-            
-            # Determine how much of the child's tokens match our input
             match_len = 0
+            # Calculate how many tokens match in the current node's segment
             for t1, t2 in zip(child.tokens, tokens[idx:]):
                 if t1 == t2:
                     match_len += 1
@@ -452,33 +471,33 @@ class RadixTree:
                     break
             
             if match_len == len(child.tokens):
-                # Full match of this node, keep descending
+                # FULL MATCH of this node: move deeper
                 current = child
                 path.append(current)
                 idx += match_len
             else:
-                # PARTIAL MATCH: We must split the child node
-                # 1. Create the 'Suffix' node for the existing child's data
-                split_node = RadixNode(child.tokens[match_len:])
-                split_node.kv_cache = [
+                # PARTIAL MATCH: Split the existing node into two
+                # 1. Suffix node: contains the parts of the child that NO LONGER match
+                suffix_node = RadixNode(child.tokens[match_len:])
+                suffix_node.kv_cache = [
                     (k[:, :, match_len:, :].clone(), v[:, :, match_len:, :].clone()) 
                     for k, v in child.kv_cache
                 ]
-                split_node.children = child.children
+                suffix_node.children = child.children
                 
-                # 2. Shorten the current child to the matching part
+                # 2. Update existing child: truncate it to the shared prefix
                 child.tokens = child.tokens[:match_len]
                 child.kv_cache = [
                     (k[:, :, :match_len, :].clone(), v[:, :, :match_len, :].clone()) 
                     for k, v in child.kv_cache
                 ]
                 
-                # 3. Re-link: Child now only has the split_node as a child
-                child.children = {split_node.tokens[0]: split_node}
+                # 3. Re-link the suffix under the truncated child
+                child.children = {suffix_node.tokens[0]: suffix_node}
                 
                 current = child
                 path.append(current)
                 idx += match_len
-                break # We've exhausted the match in this branch
+                break # Split marks the end of the existing prefix path
                 
         return current, path, tokens[idx:]
