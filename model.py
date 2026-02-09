@@ -418,11 +418,6 @@ class GPT(nn.Module):
             print(f"Sample generated. Unique tokens processed: {len(suffix_tokens)}")
 
         return results
-class RadixNode:
-    def __init__(self, tokens):
-        self.tokens = tokens  # List of token IDs
-        self.children = {}    # Dict mapping first token of child to RadixNode
-        self.kv_cache = None  # List of (k, v) tuples for this specific segment
 
 class RadixNode:
     def __init__(self, tokens):
