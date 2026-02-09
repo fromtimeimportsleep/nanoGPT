@@ -121,5 +121,17 @@ with torch.no_grad():
             top_k=top_k,
         )
 
+        print("\n--- GENERATED STORIES ---\n")
+        for i, tokens_tensor in enumerate(output):
+            # Convert tensor to list and decode
+            generated_text = decode(tokens_tensor[0].tolist())
+            print(f"PROMPT {i+1}:")
+            print(generated_text)
+            print("-" * 30)
+
 end_time = time.time()
 print(f"Total time: {end_time - start_time:.2f}s")
+
+# -----------------------------------------------------------------------------
+# Print the results
+# -----------------------------------------------------------------------------
