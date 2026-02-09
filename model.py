@@ -348,59 +348,60 @@ class GPT(nn.Module):
         return idx
     
     def _get_path_kv(self, path):
-        """Concatenates KV caches from a list of RadixNodes."""
+        """Reconstructs the full KV cache by concatenating the path."""
         if not path: return None
-        
-        # Each path node has a kv_cache: list of (k, v) for each layer
         num_layers = len(path[0].kv_cache)
         combined_kv = []
-        
-        for layer_idx in range(num_layers):
-            ks = [node.kv_cache[layer_idx][0] for node in path]
-            vs = [node.kv_cache[layer_idx][1] for node in path]
-            # Concatenate along the sequence dimension (dim=2 in your model)
-            combined_kv.append((torch.cat(ks, dim=2), torch.cat(vs, dim=2)))
+        for i in range(num_layers):
+            ks = torch.cat([node.kv_cache[i][0] for node in path], dim=2)
+            vs = torch.cat([node.kv_cache[i][1] for node in path], dim=2)
+            combined_kv.append((ks, vs))
         return combined_kv
 
     @torch.no_grad()
     def generate_batch_with_radix(self, batch_prompts, max_new_tokens, temperature=1.0, top_k=None):
-        """
-        Processes a batch of prompts efficiently using a Radix Tree for KV caching.
-        """
         tree = RadixTree()
         results = []
 
+        # Optimization: Sort prompts to maximize prefix hits during tree construction
+        # batch_prompts.sort(key=lambda x: x.tolist()[0]) 
+
         for x in batch_prompts:
-            tokens = x[0].tolist() # Convert tensor to list of IDs
+            tokens = x[0].tolist()
             
-            # 1. Search for existing prefix in the tree
-            parent_node, path, suffix_tokens = tree.find_longest_prefix(tokens)
+            # 1. Search for longest matching prefix (with splitting logic)
+            parent_node, path, suffix_tokens = tree.search_and_split(tokens)
             
-            # 2. Retrieve existing KV cache
+            # 2. Retrieve the concatenated KV cache
             kv_cache = self._get_path_kv(path)
             
-            # 3. Process the "Suffix" (tokens the model hasn't seen in this context)
+            # 3. Pre-fill: Process the unique suffix
             if suffix_tokens:
                 suffix_tensor = torch.tensor([suffix_tokens], device=x.device)
-                # Forward pass returns the full KV cache (prefix + suffix)
+                # Forward pass returns the full KV (prefix + suffix)
                 logits, _, full_kv = self(suffix_tensor, kv_cache=kv_cache)
                 
-                # Extract only the NEW part of the KV cache to store in the tree
-                # suffix_len = len(suffix_tokens)
-                new_kv_only = []
+                # Extract and .clone() only the new part for the tree
+                new_kv_segment = []
                 for layer_k, layer_v in full_kv:
-                    # Your KV shape is (B, nh, T, hs). Extract last suffix_len tokens
-                    new_kv_only.append((layer_k[:, :, -len(suffix_tokens):, :], 
-                                       layer_v[:, :, -len(suffix_tokens):, :]))
+                    # Slicing the last 'len(suffix_tokens)' tokens
+                    new_kv_segment.append((
+                        layer_k[:, :, -len(suffix_tokens):, :].clone(),
+                        layer_v[:, :, -len(suffix_tokens):, :].clone()
+                    ))
                 
-                # Update tree with the newly computed segment
-                parent_node = tree.insert(parent_node, suffix_tokens, new_kv_only)
+                # Insert this unique segment into the tree
+                parent_node = tree.insert(parent_node, suffix_tokens, new_kv_segment)
                 kv_cache = full_kv
+            else:
+                # If the entire prompt was a match, we still need one forward pass 
+                # to get the logits for the first token generation.
+                logits, _, _ = self(x[:, [-1]], kv_cache=kv_cache)
             
-            # 4. Generate new tokens one by one
-            curr_idx = x # The full prompt
+            # 4. Decode: Generate new tokens one by one
+            curr_idx = x
             for _ in range(max_new_tokens):
-                # Using your optimized generate logic: only pass the last token if we have cache
+                # Standard causal KV-cache generation
                 input_cond = curr_idx[:, [-1]]
                 logits, _, kv_cache = self(input_cond, kv_cache=kv_cache)
                 
@@ -409,15 +410,14 @@ class GPT(nn.Module):
                     v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                     logits[logits < v[:, [-1]]] = -float('Inf')
                 
-                probs = F.softmax(logits, dim=-1)
+                probs = torch.nn.functional.softmax(logits, dim=-1)
                 idx_next = torch.multinomial(probs, num_samples=1)
                 curr_idx = torch.cat((curr_idx, idx_next), dim=1)
             
             results.append(curr_idx)
-            print(f"Generated sample {len(results)} with prefix reuse.")
+            print(f"Sample generated. Unique tokens processed: {len(suffix_tokens)}")
 
         return results
-
 class RadixNode:
     def __init__(self, tokens):
         self.tokens = tokens  # List of token IDs
