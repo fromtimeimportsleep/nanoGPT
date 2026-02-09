@@ -11,7 +11,7 @@ import time
 from model import GPTConfig, GPT
 
 # -----------------------------------------------------------------------------
-init_from = 'resume'
+init_from = 'gpt2'
 out_dir = 'out'
 
 num_samples = 1
